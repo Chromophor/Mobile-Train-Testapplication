@@ -23,7 +23,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 
 /**
@@ -35,6 +37,8 @@ class MainActivity : ComponentActivity() {
     // --- KONFIGURATION ---
     private val UDP_PORT = 5005 // Port für ausgehende Befehle (Broadcast)
     private val TCP_PORT = 6000 // Port für eingehende Bestätigungen (ACKs)
+
+    private val IP_ADDRESS = getLocalIpAddress(); //lokale IP-Adresse erhalten
 
     // --- VERBINDUNGS-STATUS ---
     private var statusText by mutableStateOf("Warte auf Initialisierung...") // Text in der Header-Leiste
@@ -162,6 +166,25 @@ class MainActivity : ComponentActivity() {
         }.start()
     }
 
+
+    // eigene IP Adresse herausfinden
+    private fun getLocalIpAddress(): String? {
+        try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()
+            for (intf in interfaces) {
+                val addresses = intf.inetAddresses
+                for (addr in addresses) {
+                    if (!addr.isLoopbackAddress && addr is Inet4Address) {
+                        return addr.hostAddress
+                    }
+                }
+            }
+        } catch (ex: Exception) {
+            ex.printStackTrace()
+        }
+        return null
+    }
+
     // ########################################################################
     // STEUERUNGS-LOGIK (CORE)
     // ########################################################################
@@ -236,7 +259,7 @@ class MainActivity : ComponentActivity() {
             startConnectionWatchdog()
             startHeartbeat()
             if (!isConnected) isConnecting = true
-            sendUdpBroadcast("PING_STATUS")
+            sendUdpBroadcast("Mobile-Testsoftware:" + IP_ADDRESS)
         }
     }
 
