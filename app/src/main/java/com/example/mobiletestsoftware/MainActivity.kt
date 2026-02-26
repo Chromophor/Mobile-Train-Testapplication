@@ -36,7 +36,7 @@ class MainActivity : ComponentActivity() {
 
     // --- KONFIGURATION ---
     private val UDP_PORT = 5005 // Port für ausgehende Befehle (Broadcast)
-    private val TCP_PORT = 6000 // Port für eingehende Bestätigungen (ACKs)
+    private val TCP_PORT = 6005 // Port für eingehende Bestätigungen (ACKs)
 
     private val IP_ADDRESS = getLocalIpAddress(); //lokale IP-Adresse erhalten
 
@@ -146,9 +146,11 @@ class MainActivity : ComponentActivity() {
         Thread {
             try {
                 val serverSocket = ServerSocket(TCP_PORT)
+                statusText = "Warte auf Verbindung" + getLocalIpAddress() + ":" + serverSocket
                 while (true) {
                     // Wartet auf eingehende Verbindung (blockierend)
                     val client = serverSocket.accept()
+                    statusText = "TCP Verbindung erhalten"
                     val input = client.getInputStream().bufferedReader().readLine()
 
                     // Update auf dem UI-Thread
