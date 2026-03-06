@@ -2,8 +2,8 @@ package com.example.mobiletestsoftware
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
@@ -12,6 +12,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
@@ -30,95 +32,112 @@ import java.net.ServerSocket
 
 /**
  * Hauptklasse der App.
- * Steuert die UI, die Netzwerkverbindung (UDP/TCP) und den Logik-Status der Modellbahn.
+ *
+ * Diese Activity steuert:
+ * 1. Die Benutzeroberfläche (UI) mit Jetpack Compose.
+ * 2. Die Netzwerkkommunikation (UDP Broadcasts für Befehle, TCP Listener für Rückmeldungen).
+ * 3. Die zentrale Logik der Modellbahn (Sicherheits-Status, Block-Verwaltung).
  */
 class MainActivity : ComponentActivity() {
 
-    // --- KONFIGURATION ---
+    // ========================================================================
+    // KONFIGURATION
+    // ========================================================================
     private val UDP_PORT = 5005 // Port für ausgehende Befehle (Broadcast)
     private val TCP_PORT = 6005 // Port für eingehende Bestätigungen (ACKs)
 
     private val IP_ADDRESS = getLocalIpAddress(); //lokale IP-Adresse erhalten
 
-    // --- VERBINDUNGS-STATUS ---
-    private var statusText by mutableStateOf("Warte auf Initialisierung...") // Text in der Header-Leiste
-    private var isConnected by mutableStateOf(false)      // Haben wir aktuell eine bestätigte Verbindung?
-    private var isConnecting by mutableStateOf(false)     // Versuchen wir gerade zu verbinden?
-    private var wantsConnection by mutableStateOf(false)  // Hat der User "CONNECT" gedrückt?
-    private var lastResponseTime by mutableStateOf(0L)    // Zeitstempel der letzten Antwort (für Watchdog)
+    // ========================================================================
+    // STATUS-VARIABLEN (STATE)
+    // ========================================================================
 
-    // --- STOP / PAUSE LOGIK & ZENTRALER STATUS ---
-    // true = System ist im PAUSE-Modus (Sicherheits-Halt).
-    // false = System läuft (Befehle werden live gesendet).
+    // --- Netzwerk & Verbindung ---
+    private var statusSent by mutableStateOf("-")       // UI-Text: Letzter gesendeter Befehl
+    private var statusReceived by mutableStateOf("-")   // UI-Text: Letzte empfangene Nachricht
+
+    private var isConnected by mutableStateOf(false)      // Status: Ist die physische Verbindung bestätigt?
+    private var isConnecting by mutableStateOf(false)     // Status: Verbindungsaufbau läuft?
+    private var wantsConnection by mutableStateOf(false)  // User-Intention: Wurde "CONNECT" gedrückt?
+    private var lastResponseTime by mutableStateOf(0L)    // Zeitstempel für den Watchdog (Verbindungsabbruch-Erkennung)
+
+    // --- System-Logik (Start/Stop) ---
+    // true = STOP-Modus (Sicherheitshalt, keine aktiven Blöcke an der Anlage).
+    // false = START-Modus (Normalbetrieb, Befehle werden live umgesetzt).
     private var isEmergencyStopActive by mutableStateOf(true)
 
-    // Speichert den Zustand ALLER Blöcke zentral ("Repräsentation").
-    // Key: ID (z.B. "B101"), Value: true (AN) / false (AUS)
+    // Zentrale Datenhaltung ("Single Source of Truth").
+    // Speichert den visuellen Zustand aller Gleis-Elemente (Blöcke).
+    // Key: ID (z.B. "B101"), Value: true (AN/Grün) / false (AUS/Rot).
     private val blockStates = mutableStateMapOf<String, Boolean>()
 
-    // --- UI NAVIGATION ---
-    private var selectedLevel by mutableStateOf("Ablaufberg") // Aktuell sichtbare Ebene
-    private var isLevelMenuExpanded by mutableStateOf(false)  // Status des Dropdown-Menüs
+    // --- UI Navigation ---
+    private var selectedLevel by mutableStateOf("Ablaufberg") // Aktuell angezeigter Gleisplan
+    private var isLevelMenuExpanded by mutableStateOf(false)  // Steuert das Dropdown-Menü
     private val levels = listOf("Ablaufberg", "Obere Ebene", "Mittlere Ebene")
 
-    // --- BACKGROUND JOBS ---
-    private var heartbeatJob: Job? = null // Sendet regelmäßig "Ich bin da" Signale
-    private var watchdogJob: Job? = null  // Prüft, ob die Anlage noch antwortet
+    // --- Hintergrund-Jobs ---
+    private var heartbeatJob: Job? = null // Job für regelmäßige Keep-Alive Signale
+    private var watchdogJob: Job? = null  // Job zur Überwachung der Verbindungsqualität
+
+    // ========================================================================
+    // LIFECYCLE METHODEN
+    // ========================================================================
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
-        // Startet den TCP-Server im Hintergrund, um Nachrichten der Anlage zu empfangen
+        // Startet den TCP-Server, um Nachrichten (ACKs) der Anlage zu empfangen
         startTcpListener()
 
         setContent {
             MobileTestsoftwareTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    MainLayoutWrapper(status = statusText)
+                    MainLayoutWrapper(textSent = statusSent, textReceived = statusReceived)
                 }
             }
         }
     }
 
-    // ########################################################################
-    // LIFECYCLE MANAGEMENT
-    // Sorgt dafür, dass die Verbindung sauber pausiert, wenn die App minimiert wird.
-    // ########################################################################
-
+    /**
+     * Wird aufgerufen, wenn die App in den Hintergrund geht (z.B. Home-Button).
+     * SICHERHEITS-FEATURE: Die Anlage wird sofort gestoppt, da keine Kontrolle mehr möglich ist.
+     */
     override fun onPause() {
         super.onPause()
-        // App geht in den Hintergrund -> Jobs stoppen, um Akku/Daten zu sparen
-        // und Timeouts zu verhindern, während das Handy in der Tasche ist.
         if (wantsConnection) {
-            stopConnectionLogic()
+            setSystemState(true) // Anlage stoppen (Safety Halt)
+            stopConnectionLogic() // Hintergrund-Prozesse pausieren
         }
     }
 
+    /**
+     * Wird aufgerufen, wenn die App wieder in den Vordergrund kommt.
+     * Versucht, die Verbindung wiederherzustellen, bleibt aber im STOP-Modus (Sicherheit).
+     */
     override fun onResume() {
         super.onResume()
-        // App kommt zurück -> Wenn Verbindung gewünscht war, sofort wiederherstellen.
         if (wantsConnection) {
-            statusText = "Reaktiviere Verbindung..."
-            lastResponseTime = System.currentTimeMillis() // Watchdog-Timer resetten
-
-            // Verbindungswächter und Heartbeat neu starten
+            statusSent = "Reaktiviere..."
+            lastResponseTime = System.currentTimeMillis()
             startConnectionWatchdog()
             startHeartbeat()
 
-            // Sofort prüfen, ob die Anlage erreichbar ist
             if (!isConnected) isConnecting = true
             sendUdpBroadcast("PING_STATUS")
         }
     }
 
-    // ########################################################################
+    // ========================================================================
     // NETZWERK KOMMUNIKATION
-    // ########################################################################
+    // ========================================================================
 
     /**
-     * Sendet ein UDP-Paket an alle Geräte im Netzwerk (Broadcast).
-     * Wird für Steuerbefehle verwendet.
+     * Sendet eine Nachricht per UDP Broadcast an alle Geräte im Netzwerk.
+     * Wird für Steuerbefehle (Weichen, Blöcke, Systemstatus) verwendet.
+     *
+     * @param message Der zu sendende String (z.B. "W0011").
      */
     fun sendUdpBroadcast(message: String) {
         Thread {
@@ -126,37 +145,44 @@ class MainActivity : ComponentActivity() {
                 val socket = DatagramSocket()
                 socket.broadcast = true
                 val data = message.toByteArray()
-                // 255.255.255.255 erreicht alle Geräte im lokalen Subnetz
+                // Broadcast an alle im lokalen Subnetz (255.255.255.255)
                 val broadcastAddress = InetAddress.getByName("255.255.255.255")
                 val packet = DatagramPacket(data, data.size, broadcastAddress, UDP_PORT)
                 socket.send(packet)
                 socket.close()
-                runOnUiThread { statusText = "Gesendet: $message" }
+
+                // UI-Update auf dem Hauptthread
+                runOnUiThread { statusSent = message }
             } catch (e: Exception) {
-                runOnUiThread { statusText = "Fehler: ${e.message}" }
+                runOnUiThread { statusSent = "Fehler: ${e.message}" }
             }
         }.start()
     }
 
     /**
-     * Lauscht auf eingehende TCP-Verbindungen von der Anlage (z.B. ACKs).
-     * Läuft in einem separaten Thread, um die UI nicht zu blockieren.
+     * Startet einen TCP-Server in einem Hintergrund-Thread.
+     * Wartet auf eingehende Verbindungen/Bestätigungen der Anlage.
      */
     private fun startTcpListener() {
         Thread {
             try {
                 val serverSocket = ServerSocket(TCP_PORT)
-                statusText = "Warte auf Verbindung" + getLocalIpAddress() + ":" + serverSocket
+
+                runOnUiThread {
+                    statusReceived = "Warte auf Verbindung: ${getLocalIpAddress()}:$TCP_PORT"
+                }
+
                 while (true) {
-                    // Wartet auf eingehende Verbindung (blockierend)
+                    // Blockiert, bis eine Nachricht eingeht
                     val client = serverSocket.accept()
-                    statusText = "TCP Verbindung erhalten"
+                    runOnUiThread {
+                        statusReceived = "TCP Verbindung erhalten"
+                    }
                     val input = client.getInputStream().bufferedReader().readLine()
 
-                    // Update auf dem UI-Thread
                     runOnUiThread {
-                        statusText = "ACK: $input"
-                        lastResponseTime = System.currentTimeMillis() // Lebenszeichen empfangen!
+                        statusReceived = input ?: ""
+                        lastResponseTime = System.currentTimeMillis() // Watchdog-Reset
                         if (wantsConnection) {
                             isConnected = true
                             isConnecting = false
@@ -187,81 +213,88 @@ class MainActivity : ComponentActivity() {
         return null
     }
 
-    // ########################################################################
+    // ========================================================================
     // STEUERUNGS-LOGIK (CORE)
-    // ########################################################################
+    // ========================================================================
 
     /**
-     * Verarbeitet Klicks auf Elemente im Gleisplan.
-     * Unterscheidet zwischen Weichen (sofort) und Blöcken (abhängig vom Status).
+     * Schaltet den globalen Systemzustand zwischen START und STOP.
+     *
+     * @param stop
+     * true (STOP): Sendet Nothalt und schaltet alle Ausgänge physisch ab.
+     * Der visuelle Status in der App bleibt erhalten.
+     * false (START): Hebt Nothalt auf und synchronisiert den Status aller
+     * in der App aktiven Blöcke mit der Anlage.
+     */
+    private fun setSystemState(stop: Boolean) {
+        isEmergencyStopActive = stop
+
+        if (isEmergencyStopActive) {
+            // --- STOP MODUS ---
+            sendUdpBroadcast("EMERGENCY_STOP_ON")
+            // Sicherheits-Logik: Alle aktiven Blöcke physisch ausschalten ("0" senden)
+            blockStates.forEach { (id, isActive) ->
+                if (isActive) sendUdpBroadcast("${id}0")
+            }
+            statusSent = "SYSTEM GESTOPPT (Pause)"
+        } else {
+            // --- RUN MODUS ---
+            sendUdpBroadcast("EMERGENCY_STOP_OFF")
+            // Resync-Logik: Alle visuellen Zustände an die Hardware senden
+            blockStates.forEach { (id, active) ->
+                sendUdpBroadcast("${id}${if (active) "1" else "0"}")
+            }
+            statusSent = "SYSTEM LÄUFT"
+        }
+    }
+
+    /**
+     * Verarbeitet Interaktionen mit dem Gleisplan.
+     *
+     * @param action Der Befehlscode (z.B. "W0011" oder "B1000").
      */
     private fun handleTrackAction(action: String) {
-        val id = action.substring(0, action.length - 1) // z.B. "B101"
-        val state = action.last() == '1'               // z.B. true (AN)
+        val id = action.substring(0, action.length - 1) // ID extrahieren (z.B. "B100")
+        val state = action.last() == '1'               // Status extrahieren ('1' = true)
 
         if (id.startsWith("W")) {
-            // WEICHEN: Werden IMMER sofort gesendet, egal ob Pause aktiv ist.
+            // WEICHEN: Werden immer sofort gesendet, unabhängig vom Systemstatus.
             sendUdpBroadcast(action)
         } else if (id.startsWith("B")) {
-            // BLÖCKE: Zustand wird IMMER in der App gespeichert (Repräsentation).
+            // BLÖCKE: Status wird immer gespeichert.
             blockStates[id] = state
-
-            // Befehl wird NUR gesendet, wenn das System LÄUFT (nicht in Pause ist).
+            // Physisches Senden erfolgt nur, wenn das System NICHT gestoppt ist.
             if (!isEmergencyStopActive) {
                 sendUdpBroadcast(action)
             }
         }
     }
 
+    // ========================================================================
+    // CONNECTION WATCHDOGS & HEARTBEAT
+    // ========================================================================
+
     /**
-     * Schaltet zwischen START (Betrieb) und STOP (Pause/Sicherheitsmodus) um.
-     * Synchronisiert beim Starten die App-Daten mit der Anlage.
+     * Handhabt den Klick auf den Verbinden/Trennen Button.
      */
-    private fun toggleSystemState() {
-        isEmergencyStopActive = !isEmergencyStopActive
-
-        if (isEmergencyStopActive) {
-            // --- MODUS: STOP / PAUSE ---
-            // 1. Signal senden
-            sendUdpBroadcast("EMERGENCY_STOP_ON")
-            // 2. Alle aktuell aktiven Blöcke physisch ausschalten (Sicherheit)
-            // Die Anzeige in der App bleibt aber "Grün", damit man den Plan noch sieht.
-            blockStates.forEach { (id, isActive) ->
-                if (isActive) sendUdpBroadcast("${id}0")
-            }
-            statusText = "SYSTEM GESTOPPT (Pause)"
-        } else {
-            // --- MODUS: START / RUN ---
-            // 1. Signal senden
-            sendUdpBroadcast("EMERGENCY_STOP_OFF")
-            // 2. Synchronisation: Alle in der App eingestellten Zustände an die Anlage senden.
-            blockStates.forEach { (id, active) ->
-                sendUdpBroadcast("${id}${if (active) "1" else "0"}")
-            }
-            statusText = "SYSTEM LÄUFT"
-        }
-    }
-
-    // ########################################################################
-    // CONNECTION WATCHDOGS
-    // ########################################################################
-
     private fun toggleConnection() {
         if (wantsConnection) {
-            // Trennen
+            // --- TRENNEN ---
             wantsConnection = false
             isConnected = false
             isConnecting = false
             stopConnectionLogic()
-            statusText = "Verbindung getrennt"
+            statusSent = "Getrennt"
+            statusReceived = "-"
         } else {
-            // Verbinden
+            // --- VERBINDEN ---
             wantsConnection = true
             lastResponseTime = System.currentTimeMillis()
             startConnectionWatchdog()
             startHeartbeat()
             if (!isConnected) isConnecting = true
             sendUdpBroadcast("Mobile-Testsoftware:" + IP_ADDRESS)
+            setSystemState(true)
         }
     }
 
@@ -271,8 +304,8 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Prüft regelmäßig, ob wir noch Antworten von der Anlage erhalten.
-     * Wenn > 5 Sekunden keine Antwort -> Status auf "Verloren" setzen.
+     * Überwacht die Verbindung. Wenn > 5 Sekunden keine Antwort kommt,
+     * wird der Status auf "Verloren" gesetzt.
      */
     private fun startConnectionWatchdog() {
         watchdogJob?.cancel()
@@ -281,7 +314,7 @@ class MainActivity : ComponentActivity() {
                 if (isConnected && (System.currentTimeMillis() - lastResponseTime > 5000)) {
                     isConnected = false
                     isConnecting = false
-                    runOnUiThread { statusText = "Verbindung verloren" }
+                    runOnUiThread { statusSent = "Verbindung verloren" }
                 }
                 delay(1000)
             }
@@ -289,7 +322,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Sendet alle 10 Sekunden ein Heartbeat-Signal, damit die Verbindung offen bleibt.
+     * Sendet alle 10 Sekunden ein Lebenszeichen an die Anlage.
      */
     private fun startHeartbeat() {
         heartbeatJob?.cancel()
@@ -301,57 +334,108 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // ########################################################################
-    // UI COMPOSABLES
-    // ########################################################################
+    // ========================================================================
+    // UI COMPOSABLES (Layout)
+    // ========================================================================
 
     @Composable
-    fun MainLayoutWrapper(status: String) {
-        val headerColor = MaterialTheme.colorScheme.surfaceVariant
-        val footerColor = MaterialTheme.colorScheme.surfaceVariant
+    fun MainLayoutWrapper(textSent: String, textReceived: String) {
+        // Farbdefinitionen für das Layout (angepasst für bessere Trennung)
+        val headerColor = Color(0xFFE0E0E0) // Hellgrau für Header/Footer
+        val footerColor = Color(0xFFE0E0E0)
+        val dividerColor = Color(0xFFCCCCCC) // Etwas dunkleres Grau für Trennlinien
 
         Column(modifier = Modifier.fillMaxSize().background(Color.White)) {
-            // Platzhalter für Statusleiste
+            // Platzhalter für Statusleiste (Status Bar Bereich einfärben)
             Spacer(modifier = Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars).background(headerColor))
 
-            // --- HEADER (Ebenen-Auswahl & Status) ---
-            Surface(modifier = Modifier.weight(0.08f).fillMaxWidth(), color = headerColor) {
+            // ----------------------------------------------------------------
+            // HEADER BEREICH
+            // Enthält: Dropdown-Menü, Status-Anzeigen (Gesendet/Empfangen), Preset-Button
+            // ----------------------------------------------------------------
+            Surface(modifier = Modifier.weight(0.1f).fillMaxWidth(), color = headerColor) {
                 Box(modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-                    // Linker Bereich: Dropdown Menü
+
+                    // LINKS: Dropdown Menü für Ebenen-Auswahl
                     Box(modifier = Modifier.align(Alignment.CenterStart)) {
                         Button(
                             onClick = { isLevelMenuExpanded = true },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00394A)),
-                            modifier = Modifier.height(32.dp).width(150.dp),
+                            modifier = Modifier.height(48.dp).width(200.dp),
                             contentPadding = PaddingValues(0.dp)
                         ) {
-                            Text(text = selectedLevel, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Text(
+                                text = selectedLevel,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center
+                            )
                         }
-                        DropdownMenu(expanded = isLevelMenuExpanded, onDismissRequest = { isLevelMenuExpanded = false }) {
+                        DropdownMenu(
+                            expanded = isLevelMenuExpanded,
+                            onDismissRequest = { isLevelMenuExpanded = false },
+                            modifier = Modifier.width(200.dp).background(Color.White)
+                        ) {
                             levels.forEach { level ->
-                                DropdownMenuItem(text = { Text(level, fontSize = 12.sp) }, onClick = { selectedLevel = level; isLevelMenuExpanded = false })
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(text = level, fontSize = 14.sp, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center, color = Color.Black)
+                                    },
+                                    onClick = { selectedLevel = level; isLevelMenuExpanded = false }
+                                )
                             }
                         }
                     }
-                    // Mitte: Status Text
-                    Text(text = status, modifier = Modifier.align(Alignment.Center), fontSize = 12.sp)
 
-                    // Rechts: Preset Button (Platzhalter)
+                    // MITTE: Status Anzeige (Gesendet / Empfangen)
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .width(400.dp), // Feste Breite für stabilen Aufbau
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Spalte 1: Gesendet
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("GESENDET", fontSize = 13.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(text = textSent, fontSize = 12.sp, color = Color.Black, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        // Spalte 2: Empfangen
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("EMPFANGEN", fontSize = 13.sp, color = Color.Black, fontWeight = FontWeight.Bold)
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(text = textReceived, fontSize = 12.sp, color = Color(0xFF00394A), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+
+                    // RECHTS: Preset Button (Platzhalter für zukünftige Funktionen)
                     Button(
                         onClick = {},
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00394A)),
-                        modifier = Modifier.align(Alignment.CenterEnd).height(32.dp).width(150.dp),
+                        modifier = Modifier.align(Alignment.CenterEnd).height(48.dp).width(200.dp),
                         contentPadding = PaddingValues(0.dp)
                     ) {
-                        Text("PRESETS", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("PRESETS", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.White)
                     }
                 }
             }
 
-            // --- MAIN CONTENT (Gleispläne) ---
-            Box(modifier = Modifier.weight(0.84f).fillMaxWidth().background(Color.White)) {
-                // Lädt die entsprechende Ebene basierend auf der Auswahl
-                // Übergibt die blockStates (Anzeige) und handleTrackAction (Logik)
+            // Trennlinie Header -> Content
+            Divider(color = dividerColor, thickness = 1.dp)
+
+            // ----------------------------------------------------------------
+            // MAIN CONTENT BEREICH (Gleispläne)
+            // ----------------------------------------------------------------
+            Box(modifier = Modifier.weight(0.8f).fillMaxWidth().background(Color.White)) {
+                // Lädt die entsprechende Ebene basierend auf der Auswahl im Dropdown
                 when (selectedLevel) {
                     "Ablaufberg" -> Ablaufberg(blockStates, ::handleTrackAction)
                     "Obere Ebene" -> ObereEbene(blockStates, ::handleTrackAction)
@@ -359,39 +443,45 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            // --- FOOTER (Control Buttons) ---
-            Surface(modifier = Modifier.weight(0.08f).fillMaxWidth(), color = footerColor) {
+            // Trennlinie Content -> Footer
+            Divider(color = dividerColor, thickness = 1.dp)
+
+            // ----------------------------------------------------------------
+            // FOOTER BEREICH
+            // Enthält: Verbindungs-Button, Start/Stop-Button, Legende
+            // ----------------------------------------------------------------
+            Surface(modifier = Modifier.weight(0.1f).fillMaxWidth(), color = footerColor) {
                 Box(modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
                     Row(
                         modifier = Modifier.fillMaxSize(),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        // Linker Button: Verbindung
+                        // Button: Verbindung (Connect/Disconnect)
                         Button(
                             onClick = { toggleConnection() },
                             colors = ButtonDefaults.buttonColors(containerColor = when { isConnected -> Color(0xFF4CAF50); isConnecting -> Color(0xFFFF9800); else -> Color(0xFFF44336) }),
-                            modifier = Modifier.height(32.dp).width(150.dp),
+                            modifier = Modifier.height(48.dp).width(200.dp),
                             contentPadding = PaddingValues(0.dp)
                         ) {
-                            Text(text = if (isConnected) "CONNECTED" else if (isConnecting) "CONNECTING..." else "DISCONNECTED", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(text = if (isConnected) "CONNECTED" else if (isConnecting) "CONNECTING..." else "DISCONNECTED", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
 
-                        // Rechter Button: START / STOP
-                        // Grün (START) wenn System gestoppt ist. Rot (STOP) wenn System läuft.
+                        // Button: System START / STOP (Nutzt setSystemState Logik)
                         Button(
-                            onClick = { toggleSystemState() },
+                            onClick = { setSystemState(!isEmergencyStopActive) },
                             colors = ButtonDefaults.buttonColors(containerColor = if (isEmergencyStopActive) Color(0xFF4CAF50) else Color(0xFFF44336)),
-                            modifier = Modifier.height(32.dp).width(150.dp),
+                            modifier = Modifier.height(48.dp).width(200.dp),
                             contentPadding = PaddingValues(0.dp)
                         ) {
-                            Text(text = if (isEmergencyStopActive) "START" else "STOP", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color.White)
+                            Text(text = if (isEmergencyStopActive) "START" else "STOP", fontWeight = FontWeight.Bold, fontSize = 14.sp, color = Color.White)
                         }
                     }
-                    // Legende in der Mitte
-                    Text(text = "C = Curved, S = Straight", modifier = Modifier.align(Alignment.Center), fontSize = 10.sp, color = Color.Gray, fontWeight = FontWeight.Bold)
+                    // Legende
+                    Text(text = "C = Curved, S = Straight", modifier = Modifier.align(Alignment.Center), fontSize = 13.sp, color = Color.Black, fontWeight = FontWeight.Bold)
                 }
             }
+            // Platzhalter für Navigation Bar (unten)
             Spacer(modifier = Modifier.fillMaxWidth().windowInsetsBottomHeight(WindowInsets.navigationBars).background(footerColor))
         }
     }
