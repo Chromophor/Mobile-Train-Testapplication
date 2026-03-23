@@ -1,6 +1,7 @@
 package com.example.mobiletestsoftware
 
 import android.os.Bundle
+import android.util.Log.e
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
@@ -29,6 +30,7 @@ import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
+import java.io.ByteArrayOutputStream
 
 /**
  * Hauptklasse der App.
@@ -61,6 +63,14 @@ class MainActivity : ComponentActivity() {
     private var wantsConnection by mutableStateOf(false)  // User-Intention: Wurde "CONNECT" gedrückt?
     private var lastResponseTime by mutableStateOf(0L)    // Zeitstempel für den Watchdog (Verbindungsabbruch-Erkennung)
 
+
+    @Volatile private var tcpRunning = false
+    private var serverSocket: ServerSocket? = null
+    private var tcpThread: Thread? = null
+
+    private var clientBeendet = false
+
+
     // --- System-Logik (Start/Stop) ---
     // true = STOP-Modus (Sicherheitshalt, keine aktiven Blöcke an der Anlage).
     // false = START-Modus (Normalbetrieb, Befehle werden live umgesetzt).
@@ -89,7 +99,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         // Startet den TCP-Server, um Nachrichten (ACKs) der Anlage zu empfangen
-        startTcpListener()
+
 
         setContent {
             MobileTestsoftwareTheme {
@@ -163,35 +173,104 @@ class MainActivity : ComponentActivity() {
      * Startet einen TCP-Server in einem Hintergrund-Thread.
      * Wartet auf eingehende Verbindungen/Bestätigungen der Anlage.
      */
+
     private fun startTcpListener() {
-        Thread {
+        if (tcpRunning) return
+        tcpRunning = true
+
+        tcpThread = Thread {
             try {
-                val serverSocket = ServerSocket(TCP_PORT)
+                val ss = ServerSocket(TCP_PORT)
+                serverSocket = ss
 
                 runOnUiThread {
                     statusReceived = "Warte auf Verbindung: ${getLocalIpAddress()}:$TCP_PORT"
                 }
+                println("Warte auf Verbindung: ${getLocalIpAddress()}:$TCP_PORT")
 
-                while (true) {
-                    // Blockiert, bis eine Nachricht eingeht
-                    val client = serverSocket.accept()
-                    runOnUiThread {
-                        statusReceived = "TCP Verbindung erhalten"
-                    }
-                    val input = client.getInputStream().bufferedReader().readLine()
+                ss.soTimeout = 1000 // damit stop() schnell greift
 
-                    runOnUiThread {
-                        statusReceived = input ?: ""
-                        lastResponseTime = System.currentTimeMillis() // Watchdog-Reset
-                        if (wantsConnection) {
-                            isConnected = true
-                            isConnecting = false
-                        }
+                while (tcpRunning) {
+                    try {
+                        val client = ss.accept()
+
+                        Thread {
+                            val socket = client
+                            try {
+                                socket.soTimeout = 0 // dauerhaft offen lassen
+
+                                runOnUiThread {
+                                    statusReceived = "TCP Verbindung erhalten: ${socket.inetAddress.hostAddress}"
+                                }
+                                println("TCP Verbindung erhalten: ${socket.inetAddress.hostAddress}")
+
+                                val input = socket.getInputStream()
+                                val buffer = ByteArray(1024)
+
+                                // Dauerhafte Empfangsschleife
+                                while (tcpRunning && !socket.isClosed) {
+                                    try {
+                                        val len = input.read(buffer)
+
+                                        if (len == -1) {
+                                            println("Client hat TCP geschlossen")
+                                            break
+                                        }
+
+                                        if (len > 0) {
+                                            val message = String(buffer, 0, len)
+
+                                            println("Empfangen: $message")
+
+                                            runOnUiThread {
+                                                statusReceived = "ACK: $message"
+                                                lastResponseTime = System.currentTimeMillis()
+
+                                                if (wantsConnection) {
+                                                    isConnected = true
+                                                    isConnecting = false
+                                                }
+                                            }
+                                        }
+
+                                    } catch (e: java.net.SocketTimeoutException) {
+                                        // ignorieren → weiter warten
+                                    }
+                                }
+
+                            } catch (e: Exception) {
+                                e.printStackTrace()
+                            } finally {
+                                println("Client hat Socket beendet oder Socket wird geschlossen")
+                                clientBeendet = true
+                                try { socket.close() } catch (_: Exception) {}
+                            }
+                        }.start()
+
+                    } catch (e: java.net.SocketTimeoutException) {
+                        // accept timeout → weiter prüfen ob tcpRunning noch true ist
                     }
-                    client.close()
                 }
-            } catch (e: Exception) { e.printStackTrace() }
-        }.start()
+
+            } catch (e: Exception) {
+                e.printStackTrace()
+                println("TCP wird geschlossen")
+            } finally {
+                tcpRunning = false
+                try { serverSocket?.close() } catch (_: Exception) {}
+                serverSocket = null
+                println("TCP Socket finally geschlossen")
+            }
+        }.also { it.start() }
+    }
+
+
+    private fun stopTcpListener() {
+        tcpRunning = false
+        try { serverSocket?.close() } catch (_: Exception) {}
+        tcpThread?.interrupt()
+        tcpThread = null
+        println("TCP Stopp")
     }
 
 
@@ -284,10 +363,12 @@ class MainActivity : ComponentActivity() {
             isConnected = false
             isConnecting = false
             stopConnectionLogic()
+            stopTcpListener()
             statusSent = "Getrennt"
             statusReceived = "-"
         } else {
             // --- VERBINDEN ---
+            startTcpListener()
             wantsConnection = true
             lastResponseTime = System.currentTimeMillis()
             startConnectionWatchdog()
