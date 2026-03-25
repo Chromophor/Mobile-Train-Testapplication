@@ -1,7 +1,7 @@
 package com.example.mobiletestsoftware
 
+import android.R.id.input
 import android.os.Bundle
-import android.util.Log.e
 import androidx.activity.ComponentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.setContent
@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -30,7 +31,6 @@ import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
-import java.io.ByteArrayOutputStream
 
 /**
  * Hauptklasse der App.
@@ -49,6 +49,10 @@ class MainActivity : ComponentActivity() {
     private val TCP_PORT = 6005 // Port für eingehende Bestätigungen (ACKs)
 
     private val IP_ADDRESS = getLocalIpAddress(); //lokale IP-Adresse erhalten
+    @Volatile private var tcpRunning = false
+    private var serverSocket: ServerSocket? = null
+    private var tcpThread: Thread? = null
+    private var clientBeendet = false
 
     // ========================================================================
     // STATUS-VARIABLEN (STATE)
@@ -64,22 +68,18 @@ class MainActivity : ComponentActivity() {
     private var lastResponseTime by mutableStateOf(0L)    // Zeitstempel für den Watchdog (Verbindungsabbruch-Erkennung)
 
 
-    @Volatile private var tcpRunning = false
-    private var serverSocket: ServerSocket? = null
-    private var tcpThread: Thread? = null
-
-    private var clientBeendet = false
-
-
     // --- System-Logik (Start/Stop) ---
     // true = STOP-Modus (Sicherheitshalt, keine aktiven Blöcke an der Anlage).
     // false = START-Modus (Normalbetrieb, Befehle werden live umgesetzt).
     private var isEmergencyStopActive by mutableStateOf(true)
 
     // Zentrale Datenhaltung ("Single Source of Truth").
-    // Speichert den visuellen Zustand aller Gleis-Elemente (Blöcke).
-    // Key: ID (z.B. "B101"), Value: true (AN/Grün) / false (AUS/Rot).
+    // Speichert den visuellen Zustand aller Gleis-Elemente.
+    // Key: ID (z.B. "B101"), Value: true (AN/Grün/S) / false (AUS/Rot/C).
     private val blockStates = mutableStateMapOf<String, Boolean>()
+    private val switchStates = mutableStateMapOf<String, Boolean>() // Zentrale Speicherung der Weichenzustände
+
+    private var activeLiftLevel by mutableStateOf<Int?>(null)
 
     // --- UI Navigation ---
     private var selectedLevel by mutableStateOf("Ablaufberg") // Aktuell angezeigter Gleisplan
@@ -173,7 +173,6 @@ class MainActivity : ComponentActivity() {
      * Startet einen TCP-Server in einem Hintergrund-Thread.
      * Wartet auf eingehende Verbindungen/Bestätigungen der Anlage.
      */
-
     private fun startTcpListener() {
         if (tcpRunning) return
         tcpRunning = true
@@ -227,6 +226,9 @@ class MainActivity : ComponentActivity() {
                                                 lastResponseTime = System.currentTimeMillis()
 
                                                 if (wantsConnection) {
+                                                    if (!isConnected) {
+                                                        forceSyncSwitches()
+                                                    }
                                                     isConnected = true
                                                     isConnecting = false
                                                 }
@@ -234,7 +236,7 @@ class MainActivity : ComponentActivity() {
                                         }
 
                                     } catch (e: java.net.SocketTimeoutException) {
-                                        // ignorieren → weiter warten
+                                        // ignorieren -> weiter warten
                                     }
                                 }
 
@@ -248,7 +250,7 @@ class MainActivity : ComponentActivity() {
                         }.start()
 
                     } catch (e: java.net.SocketTimeoutException) {
-                        // accept timeout → weiter prüfen ob tcpRunning noch true ist
+                        // accept timeout -> weiter prüfen ob tcpRunning noch true ist
                     }
                 }
 
@@ -264,7 +266,11 @@ class MainActivity : ComponentActivity() {
         }.also { it.start() }
     }
 
-
+    /**
+     * Schaltet den TCP-Listener aus, wenn man sich nicht mehr verbinden möchte.
+     *
+     * Schließt den ServerSocket sauber
+     */
     private fun stopTcpListener() {
         tcpRunning = false
         try { serverSocket?.close() } catch (_: Exception) {}
@@ -274,7 +280,10 @@ class MainActivity : ComponentActivity() {
     }
 
 
-    // eigene IP Adresse herausfinden
+    /**
+     * Findet die eigene IP Adresse heraus
+     *
+     */
     private fun getLocalIpAddress(): String? {
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces()
@@ -333,18 +342,120 @@ class MainActivity : ComponentActivity() {
      * @param action Der Befehlscode (z.B. "W0011" oder "B1000").
      */
     private fun handleTrackAction(action: String) {
+        // Logik für Lift
+        if (action.startsWith("L")) {
+            if (!isEmergencyStopActive) {
+                val level = action.last().digitToInt()
+                activeLiftLevel = level
+                if (isConnected) {
+                    sendUdpBroadcast(action)
+                }
+            }
+            return
+        }
+
         val id = action.substring(0, action.length - 1) // ID extrahieren (z.B. "B100")
         val state = action.last() == '1'               // Status extrahieren ('1' = true)
 
-        if (id.startsWith("W")) {
-            // WEICHEN: Werden immer sofort gesendet, unabhängig vom Systemstatus.
-            sendUdpBroadcast(action)
+        if (id.startsWith("W") || id.startsWith("K")) {
+            // WEICHEN: Zustand speichern und sofort senden, wenn Anlage verbunden
+            switchStates[id] = state
+            if (isConnected) {
+                sendUdpBroadcast(action)
+            }
         } else if (id.startsWith("B")) {
             // BLÖCKE: Status wird immer gespeichert.
             blockStates[id] = state
             // Physisches Senden erfolgt nur, wenn das System NICHT gestoppt ist.
             if (!isEmergencyStopActive) {
-                sendUdpBroadcast(action)
+                if (isConnected) {
+                    sendUdpBroadcast(action)
+                }
+            }
+        }
+    }
+
+    /**
+     * Synchronisiert alle Weichenzustände der App mit der physischen Anlage.
+     */
+    private fun forceSyncSwitches() {
+        val allSwitches = listOf(
+            "W000", "W001", "W002", "W003", "W004", "K000",
+            "W100", "W101", "W102", "W103", "W104", "W105", "W106", "W107", "W108", "W109", "W110", "W111", "W112", "W113", "K100", "K101", "K102", "K103",
+            "W200", "W201", "W202", "W203", "W204", "W205", "W206", "W207", "W208", "W209", "W210", "W211", "K200"
+        )
+        Thread {
+            allSwitches.forEach { id ->
+                val state = switchStates[id] ?: true
+                sendUdpBroadcast("${id}${if (state) "1" else "0"}")
+
+                // Delay zwischen Nachrichten
+                Thread.sleep(500)
+            }
+        }.start()
+    }
+
+    /**
+     * Die Lift-Steuerung mit Buttons im gleichen Stil wie die restliche App.
+     */
+    @Composable
+    fun LiftControl(activeLevel: Int?, blockStates: Map<String, Boolean>, onAction: (String) -> Unit) {
+        Column(
+            modifier = Modifier.fillMaxSize().padding(vertical = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            // Überschrift präsenter und in Schwarz
+            Text("LIFT", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Ebenen-Auswahl L01 bis L03 (Stil wie Weichen/Blöcke)
+            val liftLevels = listOf(1, 2, 3)
+            liftLevels.forEach { num ->
+                val isActive = activeLevel == num
+                val canClick = !isActive && !isEmergencyStopActive
+
+                Button(
+                    onClick = { onAction("L400$num") },
+                    enabled = canClick,
+                    modifier = Modifier.padding(vertical = 4.dp).size(40.dp), // Fix auf 40.dp
+                    shape = RectangleShape,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (isActive) Color(0xFF4CAF50) else Color(0xFF00394A),
+                        disabledContainerColor = if (isActive) Color(0xFF4CAF50) else Color(0xFF9E9E9E),
+                        contentColor = Color.White,         // Schrift immer Weiß
+                        disabledContentColor = Color.White   // Auch im gesperrten Zustand Weiß
+                    ),
+                    contentPadding = PaddingValues(0.dp)
+                ) {
+                    Text("L0$num", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Divider(modifier = Modifier.width(40.dp), color = Color(0xFFCCCCCC), thickness = 1.dp)
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Streckenblock auf dem Lift B400 (Exakte Kopie der TrackBlock-Optik)
+            val isBlockActive = blockStates["B400"] ?: false
+            Button(
+                onClick = { onAction("B400${if (isBlockActive) "0" else "1"}") },
+                modifier = Modifier.size(40.dp), // Fix auf 40.dp
+                shape = RectangleShape,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (isBlockActive) Color(0xFF4CAF50) else Color(0xFFF44336),
+                    contentColor = Color.White
+                ),
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy((-10).dp, Alignment.CenterVertically) // Gleicher Abstand wie TrackBlock
+                ) {
+                    Text("B01", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text(if (isBlockActive) "ON" else "OFF", fontSize = 10.sp)
+                }
             }
         }
     }
@@ -374,7 +485,7 @@ class MainActivity : ComponentActivity() {
             startConnectionWatchdog()
             startHeartbeat()
             if (!isConnected) isConnecting = true
-            sendUdpBroadcast("Mobile-Testsoftware:" + IP_ADDRESS)
+                sendUdpBroadcast("modellbahn_server:broadcast_ip")
             setSystemState(true)
         }
     }
@@ -385,19 +496,28 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Überwacht die Verbindung. Wenn > 5 Sekunden keine Antwort kommt,
+     * Überwacht die Verbindung. Wenn > 15 Sekunden keine Antwort kommt,
      * wird der Status auf "Verloren" gesetzt.
      */
     private fun startConnectionWatchdog() {
         watchdogJob?.cancel()
         watchdogJob = lifecycleScope.launch(Dispatchers.Default) {
             while (isActive) {
-                if (isConnected && (System.currentTimeMillis() - lastResponseTime > 5000)) {
-                    isConnected = false
-                    isConnecting = false
-                    runOnUiThread { statusSent = "Verbindung verloren" }
+                delay(5000)
+
+                val silenceDuration = System.currentTimeMillis() - lastResponseTime
+
+                // Timeout erst nach 25 Sekunden (erlaubt 2 verpasste Heartbeats)
+                if (isConnected && (silenceDuration > 25000)) {
+                    runOnUiThread {
+                        isConnected = false
+                        isConnecting = false
+                        wantsConnection = false
+                        statusSent = "Verbindung verloren (Timeout)"
+
+                        stopConnectionLogic()
+                    }
                 }
-                delay(1000)
             }
         }
     }
@@ -515,16 +635,28 @@ class MainActivity : ComponentActivity() {
             // ----------------------------------------------------------------
             // MAIN CONTENT BEREICH (Gleispläne)
             // ----------------------------------------------------------------
-            Box(modifier = Modifier.weight(0.8f).fillMaxWidth().background(Color.White)) {
-                // Lädt die entsprechende Ebene basierend auf der Auswahl im Dropdown
-                when (selectedLevel) {
-                    "Ablaufberg" -> Ablaufberg(blockStates, ::handleTrackAction)
-                    "Obere Ebene" -> ObereEbene(blockStates, ::handleTrackAction)
-                    "Mittlere Ebene" -> MittlereEbene(blockStates, ::handleTrackAction)
+            Row(modifier = Modifier.weight(0.8f).fillMaxWidth()) {
+
+                // LINKS: Lift-Bereich (Immer sichtbar)
+                Surface(
+                    modifier = Modifier.width(80.dp).fillMaxHeight(),
+                    color = Color(0xFFF0F0F0)
+                ) {
+                    LiftControl(activeLiftLevel, blockStates, ::handleTrackAction)
+                }
+
+                Box(modifier = Modifier.fillMaxHeight().width(1.dp).background(dividerColor))
+
+                // RECHTS: Gleisplan-Inhalt
+                Box(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                    when (selectedLevel) {
+                        "Ablaufberg" -> Ablaufberg(blockStates, switchStates, ::handleTrackAction)
+                        "Obere Ebene" -> ObereEbene(blockStates, switchStates, ::handleTrackAction)
+                        "Mittlere Ebene" -> MittlereEbene(blockStates, switchStates, ::handleTrackAction)
+                    }
                 }
             }
 
-            // Trennlinie Content -> Footer
             Divider(color = dividerColor, thickness = 1.dp)
 
             // ----------------------------------------------------------------
