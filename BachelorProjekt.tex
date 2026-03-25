@@ -1,0 +1,189 @@
+\documentclass{article}
+
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb}
+\usepackage{ngerman}
+\usepackage{graphicx}
+\usepackage{tabularx}
+\usepackage{mathptmx}
+\usepackage[scaled=.92]{helvet}
+\usepackage{courier}
+
+\begin{document}
+
+\parindent0cm % verhindert das Einrücken von Absätzen 
+
+% Hier wird die Titelseite gebastelt
+% Zuerst wird die Seite auf empty eingestellt, das heißt sie hat keine 
+% Seitenzahl und auch keine Kopf- bzw. Fußzeile
+\thispagestyle{empty}
+
+% Der Titel wird zentriert in fetter riesiger Schrift gesetzt.
+
+\begin{center}
+\begin{Huge}
+\textbf{Bachelorprojekt Informatik \\ \vspace{0.2cm}
+CS3701-KP05\\ \vspace{2.5cm}
+Institut für Telematik\\ \vspace{0.2cm}
+Wintersemester 2025/26\\\vspace{2.5cm}
+Entwicklung einer Android-App zur mobilen
+Überwachung der H0-Modellbahn}\vspace{1.5cm}
+\end{Huge}
+
+% Weiter in großer Schrift
+
+\begin{huge}
+Thorben Heinz, 756972 \\
+<Name>, <Matriklenummer> \\
+Lübeck, \today 
+
+\textbf{Leitung:} Prof. Dr. Stefan Fischer
+
+\textbf{Mitarbeiter:} Ingrid Schumacher, Dipl.-Inf.\\
+Klaus-Dieter Schumacher, Dipl.-Inf. 
+\end{huge}
+
+\end{center}
+
+% Inhaltsverzeichnis
+
+\setcounter{page}{0}
+
+\newpage 
+\pagenumbering{roman} 
+
+
+\tableofcontents 
+
+\newpage
+
+% Start der eigentlichen Arbeit
+
+\setcounter{page}{0}
+\pagenumbering{arabic} 
+
+\section{Ziel der Arbeit}
+Die Android App \textbf{MobileTrainTestsoftware} dient als mobile Erweiterung der Leitstelle und ergänzt die auf den Steuerrechnern installierte Testsoftware.
+Die momentan auf den Steuerrechnern installierte Testsoftware hat den Nachteil, dass zwei Personen zum Testen der jeweiligen Ebene notwendig sind.
+Unmittelbar nach dem Schalten einer Komponente ist diese bereits geschaltet und es ist nicht leicht erkennbar, ob dies problemlos abgelaufen ist.
+Mit der von uns entwickelten Android App MobileTrainTestsoftware kann eine geschaltete Komponente direkt beobachtet werden, da die Nutzung der App mobil möglich ist.
+
+\subsection{Anforderungen}
+Zu Beginn des Projektes wurde von unserer Auftraggeberin Frau Schumacher festgelegt, welche Anforderungen unsere App erfüllen soll.
+Die zu entwickelnde App soll alle Ebenen der Modelleisenbahnanlage darstellen und steuern können.
+Weichen und Streckenblöcke sollen mit dem Gleisplan dargestellt sein und durch interaktives Feedback steuerbar sein.
+Außerdem soll die App über eine angenehme und moderne UI verfügen.
+
+\section{Einleitung}\label{einleitung}
+Hier folgt noch eine Einleitung zu der Modelleisenbahnanlage.
+
+
+\section{Analyse bisheriger Technologien}
+\subsection{Netzwerkkommunikation}
+Die Kommunikation wird in der Modelleisenbahnanlage auf unterschiedliche Weise umgesetzt.
+Dabei befinden sich alle Geräte im selben Netzwerk, über welches die Kommunikation läuft.
+
+Zum einen gibt es die Leitstelle (Pi400). 
+Sie kommuniziert mit auf der Anlage verteilten Steuerrechnern (RPi4) zum Ändern der Zustände von Weichen oder Streckenblöcken.
+Die Leitstelle sendet dazu zunächst die eigene IP-Adresse per UDP-Broadcast an alle, im Netzwerk vorhandenen, Steuerrechner. 
+Gleichzeitig wird ein Thread zum Annehmen einer TCP-Verbindung zu den jeweiligen Steuerrechnern gestartet. 
+Jede TCP-Verbindung kann zum Senden von Informationen (neue Komponentenkonfiguration) oder dem Empfang von Zuständen der Komponenten verwendet werden. 
+Dazu läuft jede TCP-Verbindung in einem eigenen Thread. Wenn eine definierte Anzahl Steuerrechner eine TCP-Verbindung zu der Leitstelle aufgebaut haben, wird ein Initialzustand (für Weichen und Streckenblöcke) an alle Steuerrechner gensendet. 
+Eine Zustandsänderung einer Komponente wird per UDP übertragen und es wird auf eine Antwort des zuständigen Steuerrechners gewartet. 
+Nachzulesen ist dies in der main.py und Network\_new.py in der Leitstellen Software.
+Die Steuerrechner wiederum warten auf einen ankommenden UDP-Broadcast der Leitstelle. 
+Nachdem die UDP- und TCP-Sockets eingerichtet wurden, wird der UDP-Socket abgehört. 
+Erfasst der Steuerrechner ein UDP-Broadcast, so baut der Steuerrechner eine TCP-Verbindung zu der IP-Adresse der Leitstelle auf, welche in der UDP Nachricht mitgesendet wird.
+Wichtig ist, dass der Steuerrechner eine TCP-Verbindung zum Port 6005 öffnet.
+Würde an der Leitstelle ein anderer Port für die TCP-Verbindung geöffnet, so könnte keine Verbindung hergestellt werden.
+Die IP-Adresse muss für den Steuerrechner nicht im String der UDP-Nachricht enthalten sein, da diese schon im Daten-Paket vorhanden ist.
+Somit erwarten die Steuerrechner als Verbindungsaufbau UDP-Nachricht keinen spezifischen String.
+Der Steuerrechner des Lift-Blocks erwartet allerdings einen spezifischen String.
+Wird dieser nicht gesendet, so baut er keine Verbindung auf. 
+Über die aufgebaute TCP-Verbindung wird eine Nachricht mit dem erfolgreichen Verbindungaufbau an die Leitstelle zurückgeschickt. 
+Anschließend wird die UDP-Verbindung vom Steuerrechner in einem eigenen Thread abgehört. 
+Nachdem alles initialisiert ist, wird in die Main-Loop übergegangen, wo das jeweils älteste Element einer zuvor initialisierten Queue behandelt wird. 
+Wird eine Nachricht via UDP empfangen, so wird in dieser Nachricht überprüft, ob der jeweilige Steuerrechner angesprochen wird. 
+Sollte das nicht der Fall sein, wird die Nachricht verworfen. 
+Sollte das Level dem Level des Steuerrechners entsprechen, so wird der Befehl in der Queue abgelegt. 
+Nach der Ausführung des Befehls, wird mit Hilfe des Communicators eine Bestätigung der Ausführung über TCP an die Leitstelle zurückgesendet. 
+Nachzulesen ist dies in \_\_main\_\_.py und communicator.py in der Software des Steuerrechners.
+
+
+
+\section{Umsetzung der Android App}
+
+\subsection{Planung der Android App und Entwicklungsschritte}
+Nachdem die Anforderungen an unsere App festgelegt wurden, haben wir eine Einführung in die Modelleisenbahnanlage bekommen. 
+Dabei haben wir uns die Gleispläne und die eingesetzten Geräte (Steuerrechner, Leitstelle, Tablet) angesehen.
+Zu der Steuerrung via Steuerrechner haben wir mit direkten I2C Befehlen einige Weichen testweise über einen der Steuerrechner geschaltet.
+Dies half uns, ein Verständnis für die Befehle und Schaltungslogik der Anlage zu bekommen.
+Als Resultat haben wir einen Arbeitsplan entwickelt.
+
+Im Vorhinein haben wir vereinbart, Schritte arbeitsteilig anzugehen.
+Yannic entschied sich, die Gestaltung der App sowie das Frontend zu übernehmen, während Thorben die Netzwerkkommunikation und das Backend übernahm.
+Der Arbeitsplan enthielt folgende Schritte:
+\begin{enumerate}
+    \item Bezeichnung der Weichen und Streckenblöcke auf der Anlage mit Etikitiergerät anbringen
+    \item Skizze für den Aufbau der App entwickeln (Yannic)
+    \item Analyse der vorhandenen Technologie und Kommunikationstechnologie der App festlegen (Thorben)
+    \item Mockup der App erstellen (Yannic)
+    \item Erstes Element der Anlage in Praxisversuch schalten (Thorben)
+    \item Alle anderen Funktionen umsetzen (Yannic und Thorben)
+    \item Front- und Backend zusammenfügen
+    \item Iteration ab Punkt 6, falls der Auftraggeber nicht zufrieden ist
+    \item Abgabe des finalen Produkts und Dokumentation
+\end{enumerate}
+
+Nach der Analyse der vorhandenen Technologien haben wir uns bezüglich der Netzwerkkommunikation zuerst Gedanken darüber gemacht, wie wir Nachrichten an Steuerrechner senden können.
+Unsere erste Überlegung war, alle Steuerrechner einzeln direkt via SSH anzusprechen.
+Allerdings wurde uns schnell bewusst, dass diese Idee nicht umsetzbar ist, da die Steuerrechner eine dynamsiche IP-Adresse haben.
+Für eine direkte Kommunikation via SSH bräuchten wir die IP Adresse der jeweiligen Steuerrechner.
+
+Nachdem wir diese Idee aufgegeben hatten, haben wir uns an eine Internetprotokoll basierte Kommunikation wie zwischen Leitstelle und Steuerrechner festgelegt.
+Um einen ähnlichen Ansatz wie bei der vorhandenen Kommunikation zu verfolgen, war es nötig, die bereits vorhanden Umsetzungen zu analysieren.
+Nachdem wir dies getan haben, haben wir in einem ersten Test versucht festzustellen, ob die Kommunikation auch mit einer Android App funktioniert.
+Getestet haben wir dies zu Beginn mit einem einfachen Button, der lediglich eine einzige Weiche schaltet konnte.
+Die Steuerrechner sind beim Testen zu Beginn abgestürzt, da unsere Testversion noch keinen TCP-Listener hatte.
+Nachdem die Steuerrechner allerdings korrekt mit der Leitstelle verbunden ware, war es kein Problem eine UDP-Nachricht von einem zweiten Gerät neben der Leitstelle an die Steuerrechner zu senden.
+Das Ergebnis dieses Tests war, dass wir ohne Initialisierung der Steuerrechner eine Weiche korrekt schalten konnten.
+Nach diesem Ergebnis haben wir die grafische Benutzeroberfläche entworfen und an einer TCP-Listener-Methode gearbeitet.
+
+\subsection{Netzwerkkommunikation}
+Die Android App befindet sich im selben WLAN wie die anderen Komponenten der Modelleisenbahnanlage.
+Dies ist das Netzwerk \textbf{eisenbahn}, welches aktiv ist, sobald dies an der Fritz-Box eingeschaltet ist.
+Die App hat im Android-Manifest die Erlaubnis, Netzwerkkommunikation zu nutzen.
+
+Zuerst wird ein TCP-Listener gestartet, der den TCP-Port 6005 abhört.
+Sollte der TCP-Listener einen Verbindungsaufbau erfassen, so wird dieser in einem neuen Thread behandelt.
+Dies ermöglicht, eine TCP-Verbindung mit mehreren Clients herzustellen.
+In diesem Fall sind die Clients die Steuerrechner der jeweiligen Modellbahn Ebenen.
+Anders als bei der Leitstelle warten wir nicht auf eine Verbindung zu allen Steuerrechnern der Anlage, sondern öffnen so viele Threads, wie Verbindungen eingehen.
+
+Über einen Button links unten kann man steuern, ob ein Verbindungaufbau zu den Steuerrechnern erfolgen soll.
+Beim Öffnen der App ist unsere App im Disconnected Modus, was auch auf dem Button angezeigt wird.
+Möchten wir eine Verbindung herstellen, so aktivieren wir den Button.
+Es erscheint der Text connecting und der Button ist orange.
+Im Hintergrund wird nun eine Nachricht via UDP-Broadcast an alle Netzwerkgeräte im selben Netzwerk gesendet.
+Die Nachricht enthält einen String und das zugehörige Datenpaket, in dem auch die IP-Adresse enthalten ist.
+Der UDP-Broadcast läuft wie auch der TCP-Listener in einem eigenen Thread.
+
+Sobald ein Steuerrechner den UDP-Broadcast entdeckt, so stellt er eine TCP-Verbindung mit der Android App auf Port 6005 her.
+Der Button, der vorher noch connecting angezeigt hat, ist nun grün und zeigt verbunden an.
+Der Steuerrechner sendet nach dem erfolgreichen Herstellen der Verbindung einen String mit der Ebene, die er steuert (Ebene 0,1,2).
+Die nun verbundenen Steuerrechner warten jetzt auf Nachrichten der Android App.
+
+Wird eine Aktion wie etwa das Schalten einer Komponente in der App durchgeführt, so wird ein String mit dem dazugehörigen Befehl an die Steuerrechner via UDP-Nachricht gesendet.
+Alle Steuerrechner empfangen demnach die Nachricht aber wie bereits bei der Analyse der bereits vorhandenen Technologien beschrieben, verarbeiten sie nur Nachrichten, die für sie vorgesehen sind.
+Sollte ein Befehl einem Steuerrechner zugehörig sein, so setzt er den Befehl um und antwortet mit einem Acknologement, welches eine Kopie des von der App gesendete Strings ist.
+Unsere App empfängt den String des Steuerrechners mit dem TCP-Listener und zeigt das Ack an.
+
+Soll die Verbindung mit den Steuerrechnern unterbrochen werden, so kann über den Button mit einem Klick die TCP-Verbindung zu allen Clients geschlossen werden.
+Nach dem Klick auf den Button, ändert sich das Aussehen von grün und der Anzeige verbunden zu rot und Disconnected.
+
+\subsection{Architektur der App}
+
+\section{Evaluation}
+
+
+\end{document}
