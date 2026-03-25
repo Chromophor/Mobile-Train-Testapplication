@@ -485,7 +485,7 @@ class MainActivity : ComponentActivity() {
             startConnectionWatchdog()
             startHeartbeat()
             if (!isConnected) isConnecting = true
-                sendUdpBroadcast("modellbahn_server:broadcast_ip")
+            sendUdpBroadcast("modellbahn_server:broadcast_ip")
             setSystemState(true)
         }
     }
