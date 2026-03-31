@@ -507,8 +507,8 @@ class MainActivity : ComponentActivity() {
 
                 val silenceDuration = System.currentTimeMillis() - lastResponseTime
 
-                // Timeout erst nach 25 Sekunden (erlaubt 2 verpasste Heartbeats)
-                if (isConnected && (silenceDuration > 25000)) {
+                // Timeout erst nach 4 Minuten
+                if (isConnected && (silenceDuration > 250000)) {
                     runOnUiThread {
                         isConnected = false
                         isConnecting = false
